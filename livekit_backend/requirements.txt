@@ -1,0 +1,21 @@
+# LiveKit Agents SDK + plugins
+livekit-agents>=0.12.0
+livekit-plugins-openai>=0.10.0
+livekit-plugins-deepgram>=0.6.0
+livekit-plugins-silero>=0.7.0        # VAD (voice activity detection)
+livekit-plugins-elevenlabs>=0.3.0
+
+# Anthropic for background reasoning agent
+anthropic>=0.25.0
+
+# FastAPI for HTTP token/webhook endpoints
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+
+# LiveKit server SDK (token generation)
+livekit>=0.17.0
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.7.0
+httpx>=0.27.0
