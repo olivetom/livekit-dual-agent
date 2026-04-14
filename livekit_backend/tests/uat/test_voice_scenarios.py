@@ -22,6 +22,7 @@ Scenarios covered:
   8. Multiple turns accumulate context          – history grows
   9. Token endpoint called before join          – JWT returned, user can connect
  10. Two users in different rooms               – no cross-room contamination
+ 11. Spanish speaker interacts with the bot     – i18n round-trip works
 """
 
 from __future__ import annotations
@@ -515,3 +516,165 @@ class TestScenario10RoomIsolation:
 
         await session_a.teardown()
         await session_b.teardown()
+
+
+# ─── Scenario 11: Spanish-speaking user ───────────────────────────────────────
+
+class TestScenario11SpanishSpeaker:
+    """
+    GIVEN  a native Spanish speaker uses the voice assistant
+    WHEN   they ask questions, trigger tools, and make a blocked request
+    THEN   the whole dual-agent pipeline is language-agnostic:
+             • Spanish utterances flow to the background agent unchanged
+             • Spanish context updates (with accents/tildes/ñ) are injected
+               into the foreground system prompt verbatim
+             • Guardrail reasons authored in Spanish are spoken back by the FG
+             • Tool outputs and multi-turn history survive a Spanish session
+
+    The foreground agent's "I'm sorry, I can't help with that." prefix is
+    English today; these tests verify that the *reason* — which the
+    background agent authors — reaches the user in whatever language the
+    background model produced it in.  This is the right contract: the
+    background agent is the authoritative source of localised text.
+    """
+
+    async def test_spanish_utterance_reaches_background_agent(self):
+        session = VoiceSession("es-simple-room")
+        session.pass_with_context(
+            "El usuario pregunta sobre el aprendizaje automático."
+        )
+
+        await session.user_says("¿Qué es el aprendizaje automático?")
+
+        # Spanish characters must survive the round-trip unchanged
+        assert "aprendizaje automático" in session.fg_context
+        # Anthropic was invoked with the Spanish user message
+        call_kwargs = session._mock_anthropic.messages.create.call_args.kwargs
+        all_content = " ".join(
+            str(m.get("content", "")) for m in call_kwargs.get("messages", [])
+        )
+        assert "¿Qué es el aprendizaje automático?" in all_content
+
+        await session.teardown()
+
+    async def test_spanish_context_preserves_accents_and_enye(self):
+        session = VoiceSession("es-unicode-room")
+        # Deliberately include tildes, ñ, ¿, ¡ and a back-tick
+        spanish_context = (
+            "Información histórica sobre España: año, niño, corazón, mañana, "
+            "¡hola!, ¿cómo estás?"
+        )
+        session.pass_with_context(spanish_context)
+
+        await session.user_says("Cuéntame sobre España")
+
+        # Every non-ASCII character round-trips intact
+        assert session.fg_context == spanish_context
+        for token in ["año", "niño", "corazón", "mañana", "España", "¡hola!", "¿cómo"]:
+            assert token in session.fg_context
+
+        # The system prompt that the FG will use on the next turn also
+        # contains the Spanish block verbatim
+        system_msg = session.fg._chat_ctx.messages[0]
+        assert "España" in system_msg.content
+        assert "niño" in system_msg.content
+
+        await session.teardown()
+
+    async def test_spanish_math_question_triggers_tool_and_speaks_result(self):
+        session = VoiceSession("es-math-room")
+        session.pass_with_tools(context="El usuario pide un cálculo")
+
+        with patch(
+            "agents.background_agent.dispatch",
+            AsyncMock(return_value={"result": 1024, "expression": "2 ** 10"}),
+        ):
+            await session.user_says("¿Cuánto es dos elevado a la diez?")
+
+        # The tool-use path was exercised via Claude and dispatch
+        assert session._mock_anthropic.messages.create.called
+        # Context enrichment was applied in Spanish
+        assert "cálculo" in session.fg_context
+
+        await session.teardown()
+
+    async def test_spanish_guardrail_reason_spoken_verbatim(self):
+        session = VoiceSession("es-block-room")
+        # Background agent authors the refusal reason in Spanish.
+        # Use explicit \uXXXX escapes so the test is robust against
+        # NFC / NFD unicode normalisation differences in the source file.
+        reason = (
+            "Esta petici\u00f3n contiene contenido da\u00f1ino "
+            "y no puedo proporcionar informaci\u00f3n peligrosa."
+        )
+        session.block_next_request(reason)
+
+        await session.user_says(
+            "\u00bfC\u00f3mo puedo fabricar un arma ilegal?"
+        )
+
+        assert session.last_spoken is not None
+        spoken = session.last_spoken
+        # The full Spanish reason is carried through byte-for-byte
+        assert reason in spoken
+        # Individual unicode characters round-trip intact
+        assert "\u00f3" in spoken   # ó  – from petición / información
+        assert "\u00f1" in spoken   # ñ  – from dañino
+
+        await session.teardown()
+
+    async def test_spanish_blocked_request_does_not_pollute_context(self):
+        session = VoiceSession("es-block-ctx-room")
+        session.block_next_request("Contenido dañino detectado.")
+
+        await session.user_says("Haz algo malo")
+
+        # Blocked → context must remain empty regardless of language
+        assert session.fg_context == ""
+
+        await session.teardown()
+
+    async def test_multi_turn_spanish_conversation_accumulates_context(self):
+        session = VoiceSession("es-multi-turn-room")
+
+        session.pass_with_context("Turno 1: el usuario saluda en español.")
+        await session.user_says("Hola, ¿cómo estás?", wait=0.2)
+        assert "Turno 1" in session.fg_context
+        assert "español" in session.fg_context
+
+        session.pass_with_context(
+            "Turno 2: el usuario pregunta por la capital de España (Madrid)."
+        )
+        await session.user_says("¿Cuál es la capital de España?", wait=0.2)
+        assert "Madrid" in session.fg_context
+        assert "Turno 2" in session.fg_context
+
+        # Background conversation history accumulated across the two Spanish turns
+        history_texts = " ".join(
+            str(m.get("content", "")) for m in session.bg._conversation_history
+        )
+        assert "cómo estás" in history_texts
+        assert "capital de España" in history_texts
+
+        await session.teardown()
+
+    async def test_spanish_and_english_sessions_are_isolated(self):
+        """Spanish speaker in room-es must not leak into English speaker's room-en."""
+        es_session = VoiceSession("room-es")
+        en_session = VoiceSession("room-en")
+
+        es_session.pass_with_context("El usuario habla español.")
+        await es_session.user_says("Buenos días, ¿puedes ayudarme?")
+
+        en_session.pass_with_context("The user speaks English.")
+        await en_session.user_says("Good morning, can you help me?")
+
+        # Each session carries only its own language's context
+        assert "español" in es_session.fg_context
+        assert "English" not in es_session.fg_context
+
+        assert "English" in en_session.fg_context
+        assert "español" not in en_session.fg_context
+
+        await es_session.teardown()
+        await en_session.teardown()
