@@ -1,0 +1,17 @@
+[tool.pytest.ini_options]
+asyncio_mode     = "auto"
+testpaths        = ["tests"]
+pythonpath       = ["."]          # lets pytest find config, message_bus, agents, tools
+addopts          = "-v --tb=short"
+markers          = [
+    "unit:        fast, pure-logic tests with no I/O",
+    "integration: component tests that wire multiple modules together",
+    "uat:         end-to-end acceptance scenarios driven from the user perspective",
+]
+
+[tool.coverage.run]
+source = ["."]
+omit   = ["tests/*", ".venv/*", "*/site-packages/*"]
+
+[tool.coverage.report]
+show_missing = true
